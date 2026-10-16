@@ -20,6 +20,7 @@ export interface ServerSpan {
   spanId: string;
   parentSpanId: string | null;
   name: string;
+  /** OTLP span kind; SERVER (2) unless given. Worker workflows and activities use INTERNAL (1). */
   kind?: OtlpSpanKind;
   startTimeUnixNano: bigint;
   endTimeUnixNano: bigint;

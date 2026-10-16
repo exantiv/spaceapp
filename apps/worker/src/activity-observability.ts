@@ -202,6 +202,8 @@ export interface ObserveActivityDependencies {
   cancelled?: () => boolean;
   spanExporter?: SpanExporter | null;
   traceRegistry?: WorkflowTraceRegistry;
+  /** OTLP export (SPACE_OTEL_EXPORTER_OTLP_ENDPOINT): one span per activity whose input carries a traceparent. */
+  spans?: SpanExporter | null;
 }
 
 export async function observeActivityExecution<T>(
@@ -326,7 +328,7 @@ export async function observeActivityExecution<T>(
           startTimeUnixNano: startNs,
           endTimeUnixNano: endNs,
           attributes: sanitizeSpanAttributes({
-            ...( workflowTrace?.attributes ?? {}),
+            ...(workflowTrace?.attributes ?? {}),
             ...mappedCorrelation,
             "space.activity_type": activityType,
             "space.activity_id": info.activityId,
@@ -343,6 +345,25 @@ export async function observeActivityExecution<T>(
           }),
           ...(links.length ? { links } : {}),
           error: outcome !== "COMPLETED"
+        });
+      }
+    } else if (dependencies.spans) {
+      const parent = parseTraceparent(extra.traceparent);
+      if (parent) {
+        dependencies.spans.record({
+          traceId: parent.traceId,
+          spanId: activitySpanId,
+          parentSpanId: parent.parentId,
+          name: `activity ${activityType}`,
+          startTimeUnixNano: BigInt(startedAt) * 1_000_000n,
+          endTimeUnixNano: BigInt(startedAt + durationMs) * 1_000_000n,
+          attributes: sanitizeSpanAttributes({
+            "space.activity_type": activityType,
+            "space.outcome": outcome,
+            "space.attempt": info.attempt
+          }),
+          error: outcome === "FAILED" || outcome === "FAILED_RESULT",
+          kind: 1
         });
       }
     }
