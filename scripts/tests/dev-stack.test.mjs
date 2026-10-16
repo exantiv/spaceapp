@@ -159,8 +159,9 @@ test("superviseProcesses surfaces a clear failure and stops remaining processes 
   await writeFile(keepAliveScript, "setInterval(() => {}, 1000);\n", "utf8");
 
   const errorLines = [];
+  let supervisor = null;
   try {
-    const supervisor = superviseProcesses(
+    supervisor = superviseProcesses(
       [
         { name: "api", command: process.execPath, args: [keepAliveScript], cwd: root, env: process.env },
         { name: "worker", command: process.execPath, args: [workerScript], cwd: root, env: process.env }
@@ -181,6 +182,7 @@ test("superviseProcesses surfaces a clear failure and stops remaining processes 
     );
     assert.ok(errorLines.some((line) => line.includes('Process "worker" exited unexpectedly')));
   } finally {
+    await supervisor?.stopAll();
     await rm(root, { recursive: true, force: true });
   }
 });

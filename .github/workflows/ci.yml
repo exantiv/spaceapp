@@ -125,6 +125,7 @@ jobs:
           assert.equal(readyBody.dependencies?.database, "RUNNING");
           assert.equal(readyBody.dependencies?.worker, "RUNNING");
           assert.equal(readyBody.dependencies?.cliHost, "RUNNING");
+          assert.equal(readyBody.dependencies?.temporal, "enabled");
 
           const claimRes = await fetch(`${baseUrl}/api/setup/claim`, {
             method: "POST",

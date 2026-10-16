@@ -553,13 +553,28 @@ export function superviseProcesses(specs, { onLog = (line) => process.stdout.wri
     spawnSpec(spec);
   }
 
+  const inFlightRestarts = new Map();
+
   async function restartProcess(name) {
-    const entry = children.get(name);
-    if (!entry || shuttingDown) return;
-    entry.restarting = true;
-    await stopChild(entry.child, 3000);
     if (shuttingDown) return;
-    spawnSpec(entry.spec);
+    const existing = inFlightRestarts.get(name);
+    if (existing) {
+      return existing;
+    }
+    const restartPromise = (async () => {
+      try {
+        const entry = children.get(name);
+        if (!entry || shuttingDown) return;
+        entry.restarting = true;
+        await stopChild(entry.child, 3000);
+        if (shuttingDown) return;
+        spawnSpec(entry.spec);
+      } finally {
+        inFlightRestarts.delete(name);
+      }
+    })();
+    inFlightRestarts.set(name, restartPromise);
+    return restartPromise;
   }
 
   async function stopAll() {
@@ -619,16 +634,19 @@ async function waitForReadyz(url, timeoutMs, failurePromise) {
         parsed?.ok === true &&
         parsed?.dependencies?.database === "RUNNING" &&
         parsed?.dependencies?.worker === "RUNNING" &&
-        parsed?.dependencies?.cliHost === "RUNNING"
+        parsed?.dependencies?.cliHost === "RUNNING" &&
+        parsed?.dependencies?.temporal === "enabled"
       ) {
         return parsed;
       }
-      lastDetail = `HTTP ${response.status}: ${text.slice(0, 240)}`;
+      lastDetail = `HTTP ${response.status} (temporal=${parsed?.dependencies?.temporal ?? "unknown"}): ${text.slice(0, 240)}`;
     } catch (error) {
       lastDetail = error instanceof Error ? error.message : String(error);
     }
   }
-  throw new Error(`Timed out waiting for ${url} to report ok: true with worker RUNNING (last state: ${lastDetail}).`);
+  throw new Error(
+    `Timed out waiting for ${url} to report ok: true with worker RUNNING and dependencies.temporal === "enabled" (last state: ${lastDetail}).`
+  );
 }
 
 function runDockerCompose(config, composeArgs, stdio = "inherit") {
@@ -689,8 +707,11 @@ function startWorkspaceSourceWatcher({ repoRoot, supervisor, onLog, onErrorLog }
     pendingWorkspaces.clear();
     if (targets.length === 0) return;
 
-    const ordered = INTERNAL_PACKAGE_BUILD_ORDER.filter((w) => targets.includes(w));
-    if (targets.includes("@space/worker")) ordered.push("@space/worker");
+    const internalPackagesChanged = INTERNAL_PACKAGE_BUILD_ORDER.filter((w) => targets.includes(w));
+    const ordered = [...internalPackagesChanged];
+    if (targets.includes("@space/worker") || internalPackagesChanged.length > 0) {
+      ordered.push("@space/worker");
+    }
 
     for (const workspace of ordered) {
       try {
@@ -699,19 +720,19 @@ function startWorkspaceSourceWatcher({ repoRoot, supervisor, onLog, onErrorLog }
           cwd: repoRoot,
           stdio: ["ignore", "pipe", "pipe"]
         });
-        if (workspace === "@space/cli-host") {
-          onLog("[dev:stack] Restarting cli-host to pick up @space/cli-host build...");
-          void supervisor.restartProcess("cli-host");
-        }
-        if (workspace === "@space/worker") {
-          onLog("[dev:stack] Restarting worker to pick up @space/worker build...");
-          void supervisor.restartProcess("worker");
-        }
       } catch (error) {
         onErrorLog(`[dev:stack] Rebuild failed for ${workspace}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
+    if (internalPackagesChanged.length > 0 || targets.includes("@space/cli-host")) {
+      onLog("[dev:stack] Restarting cli-host to pick up rebuilt packages...");
+      void supervisor.restartProcess("cli-host");
+    }
+    if (internalPackagesChanged.length > 0 || targets.includes("@space/worker")) {
+      onLog("[dev:stack] Restarting worker to pick up rebuilt packages...");
+      void supervisor.restartProcess("worker");
+    }
     if (targets.includes("@space/api") || ordered.length > 0) {
       onLog("[dev:stack] Restarting api to pick up source changes...");
       void supervisor.restartProcess("api");
@@ -769,6 +790,25 @@ function startWorkspaceSourceWatcher({ repoRoot, supervisor, onLog, onErrorLog }
   };
 }
 
+function isExpectedDevStackProcess(pid) {
+  if (!isProcessAlive(pid)) return false;
+  try {
+    const procCmdline = `/proc/${pid}/cmdline`;
+    if (existsSync(procCmdline)) {
+      const raw = execFileSync("cat", [procCmdline], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
+        .replace(/\0+/g, " ");
+      return /(cli-host|worker\.js|src\/server\.ts|vite|dev-stack\.mjs)/.test(raw);
+    }
+    const psOut = execFileSync("ps", ["-p", String(pid), "-o", "args="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    return /(cli-host|worker\.js|src\/server\.ts|vite|dev-stack\.mjs)/.test(psOut);
+  } catch {
+    return false;
+  }
+}
+
 async function stopRecordedProcesses(config) {
   if (!existsSync(config.stackStateFilePath)) return;
   try {
@@ -777,7 +817,8 @@ async function stopRecordedProcesses(config) {
     if (Number.isInteger(state.supervisorPid) && state.supervisorPid !== process.pid) {
       pids.push(state.supervisorPid);
     }
-    await Promise.all(pids.map((pid) => terminatePid(pid, 4000)));
+    const verifiedPids = pids.filter((pid) => isExpectedDevStackProcess(pid));
+    await Promise.all(verifiedPids.map((pid) => terminatePid(pid, 4000)));
     if (state.socketPath && existsSync(state.socketPath)) {
       await rm(state.socketPath, { force: true });
     }
@@ -959,6 +1000,7 @@ export async function runDevStack(argv = process.argv.slice(2), { env = process.
     SPACE_REQUIRE_PERSISTENT_STORES: "true",
     SPACEAPP_WORKFLOWS_ENABLED: "true",
     SPACE_ENABLE_WORKFLOWS: "true",
+    SPACE_ENABLE_DUMMY_TURNS: "true",
     SPACE_DB_AUTO_MIGRATE: "false",
     DATABASE_URL: secrets.databaseUrl,
     SPACE_DATABASE_URL: secrets.databaseUrl,
@@ -1097,6 +1139,9 @@ export async function runDevStack(argv = process.argv.slice(2), { env = process.
     await supervisor.stopAll();
     if (existsSync(config.socketPath)) {
       await rm(config.socketPath, { force: true });
+    }
+    if (existsSync(config.stackStateFilePath)) {
+      await rm(config.stackStateFilePath, { force: true });
     }
   };
 
