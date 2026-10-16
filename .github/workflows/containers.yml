@@ -147,7 +147,7 @@ jobs:
 
               ready=false
               for _ in $(seq 1 45); do
-                if docker exec "$app_name" gosu spaceapp node --input-type=module -e "import { CliHostClient } from './packages/cli-host/dist/index.js'; const c = new CliHostClient({ socketPath: '/run/spaceapp-cli/host.sock' }); const r = await c.ping(); await c.close(); if (!r?.ok) process.exit(1);" >/dev/null 2>&1; then
+                if timeout 15 docker exec "$app_name" gosu spaceapp node --input-type=module -e "import { CliHostClient } from './packages/cli-host/dist/index.js'; const c = new CliHostClient({ socketPath: '/run/spaceapp-cli/host.sock' }); const r = await c.ping(); await c.close(); if (!r?.ok) process.exit(1);" >/dev/null 2>&1; then
                   ready=true
                   break
                 fi
@@ -157,7 +157,7 @@ jobs:
                 docker logs "$app_name" >&2 || true
                 exit 1
               fi
-              docker exec "$app_name" gosu spaceapp opencode --version
+              timeout 15 docker exec "$app_name" gosu spaceapp opencode --version
               ;;
 
             browser)
@@ -193,7 +193,7 @@ jobs:
 
               ready=false
               for _ in $(seq 1 45); do
-                if docker exec "$app_name" gosu spaceapp node --input-type=module -e "import { BrowserHostClient } from './packages/browser-host/dist/index.js'; const c = new BrowserHostClient({ socketPath: '/run/spaceapp-browser/browser-host.sock' }); const h = await c.health(); await c.close(); if (!h?.hostPid) process.exit(1);" >/dev/null 2>&1; then
+                if timeout 15 docker exec "$app_name" gosu spaceapp node --input-type=module -e "import { BrowserHostClient } from './packages/browser-host/dist/index.js'; const c = new BrowserHostClient({ socketPath: '/run/spaceapp-browser/browser-host.sock' }); const h = await c.health(); await c.close(); if (!h?.hostPid) process.exit(1);" >/dev/null 2>&1; then
                   ready=true
                   break
                 fi
@@ -203,6 +203,6 @@ jobs:
                 docker logs "$app_name" >&2 || true
                 exit 1
               fi
-              docker exec "$app_name" gosu spaceapp sh -ec 'chromium --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --dump-dom about:blank >/dev/null || chromium --headless --no-sandbox --no-zygote --single-process --disable-gpu --disable-dev-shm-usage --dump-dom about:blank >/dev/null'
+              timeout 30 docker exec "$app_name" gosu spaceapp sh -ec 'chromium --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --dump-dom about:blank >/dev/null || chromium --headless --no-sandbox --no-zygote --single-process --disable-gpu --disable-dev-shm-usage --dump-dom about:blank >/dev/null'
               ;;
           esac
