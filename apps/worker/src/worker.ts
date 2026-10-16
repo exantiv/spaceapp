@@ -6,7 +6,7 @@ import { StreamingCredentialStore } from "@space/streaming";
 import { TelegramDeliveryWorker, TelegramSecretStore } from "@space/runtime";
 import { NativeConnection, Runtime, Worker } from "@temporalio/worker";
 import * as activities from "./activities.js";
-import { createActivityObservabilityInterceptors } from "./activity-observability.js";
+import { createWorkerObservability } from "./worker-observability.js";
 import { resolveTemporalCoreMetricsBind, resolveWorkerMetricsListen, startWorkerMetricsServer } from "./worker-metrics.js";
 import { workerLog } from "./worker-log.js";
 import { sweepCodexCliCompletions } from "./codex-cli-completion.js";
@@ -20,6 +20,7 @@ const address = process.env.SPACE_TEMPORAL_ADDRESS ?? DEFAULT_TEMPORAL_ADDRESS;
 const namespace = process.env.SPACE_TEMPORAL_NAMESPACE ?? DEFAULT_TEMPORAL_NAMESPACE;
 const taskQueue = process.env.SPACE_TEMPORAL_TASK_QUEUE ?? DEFAULT_TASK_QUEUE;
 const workflowsPath = fileURLToPath(new URL("./workflows.js", import.meta.url));
+const observability = createWorkerObservability({ serviceName: "space-worker" });
 
 function boundedInterval(value: string | undefined): number {
   const parsed = Number.parseInt(value ?? "2000", 10);
@@ -41,9 +42,7 @@ const worker = await Worker.create({
   taskQueue,
   workflowsPath,
   activities,
-  // Structured, correlated activity records and worker metrics. Activity-side
-  // only: the workflow sandbox and its replay behaviour are unchanged.
-  interceptors: { activity: [createActivityObservabilityInterceptors()] }
+  ...observability.workerOptions
 });
 
 // Optional loopback-only Prometheus endpoint for worker metrics.
@@ -172,4 +171,5 @@ try {
   telegramNotificationLoop?.stop();
   streamingBotLoop?.stop();
   chessMoveServer?.close();
+  await observability.close();
 }

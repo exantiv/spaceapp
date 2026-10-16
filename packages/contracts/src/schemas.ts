@@ -6658,7 +6658,9 @@ export const dummyTurnInputSchema = z.object({
   roomAgentOperatorRequest: z.string().trim().min(1).max(4000).optional(),
   roomAgentContinuation: z.object({
     sourceRunId: idSchema,
-    generation: z.number().int().min(1).max(16)
+    generation: z.number().int().min(1).max(16),
+    sourceTraceId: requestIdSchema.optional(),
+    sourceTraceparent: traceparentSchema.optional()
   }).optional(),
   agentUserMessageId: idSchema.optional(),
   agentAssistantMessageId: idSchema.optional(),
@@ -7453,7 +7455,8 @@ export const memoryConsolidationDetailSchema = z
 export const memoryConsolidationWorkflowInputSchema = z
   .object({
     runId: idSchema,
-    traceId: idSchema
+    traceId: idSchema,
+    traceparent: traceparentSchema.optional()
   })
   .strict();
 
@@ -7665,7 +7668,8 @@ export const listMemoryChangeSetsQuerySchema = paginationRequestSchema.extend({
 
 export const memoryMaintenanceInputSchema = z.object({
   scheduledAt: isoDateTimeSchema,
-  traceId: idSchema
+  traceId: idSchema,
+  traceparent: traceparentSchema.optional()
 });
 
 export const memoryMaintenanceResultSchema = z.object({
@@ -7737,7 +7741,8 @@ export const memoryMutationRecoveryResultSchema = z
 export const memoryMutationWorkflowInputSchema = z
   .object({
     changeSetId: idSchema,
-    traceId: idSchema
+    traceId: idSchema,
+    traceparent: traceparentSchema.optional()
   })
   .strict();
 
