@@ -1097,7 +1097,50 @@ function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-export function parsePodmanInfo(rawJson) {
+function parseDiskSizeValue(raw) {
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+    return raw < 1024 ** 2 ? Math.round(raw * 1024 ** 3) : Math.round(raw);
+  }
+  if (typeof raw === "string") {
+    const match = raw.trim().match(/^(\d+(?:\.\d+)?)\s*(gib|gb|g|mib|mb|m|tib|tb|t|b)?$/i);
+    if (match) {
+      const value = Number(match[1]);
+      const unit = (match[2] || "b").toLowerCase();
+      if (unit.startsWith("t")) return Math.round(value * 1024 ** 4);
+      if (unit.startsWith("g")) return Math.round(value * 1024 ** 3);
+      if (unit.startsWith("m")) return Math.round(value * 1024 ** 2);
+      return value < 1024 ** 2 ? Math.round(value * 1024 ** 3) : Math.round(value);
+    }
+  }
+  return null;
+}
+
+export function parsePodmanMachineDiskBytes(rawJson) {
+  let data = rawJson;
+  if (typeof rawJson === "string") {
+    try {
+      data = JSON.parse(rawJson);
+    } catch {
+      return null;
+    }
+  }
+  const items = Array.isArray(data) ? data : data && typeof data === "object" ? [data] : [];
+  for (const item of items) {
+    const candidate =
+      item?.Resources?.DiskSize ??
+      item?.resources?.diskSize ??
+      item?.DiskSize ??
+      item?.diskSize ??
+      item?.disk_size;
+    const parsed = parseDiskSizeValue(candidate);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+export function parsePodmanInfo(rawJson, machineInspectRaw = null) {
   let info = rawJson;
   if (typeof rawJson === "string") {
     try {
@@ -1121,6 +1164,14 @@ export function parsePodmanInfo(rawJson) {
     cgroupControllers.includes("cpu") &&
     cgroupControllers.includes("memory")
   );
+  const storeAllocated = Number.isFinite(info?.store?.graphRootAllocated) && info.store.graphRootAllocated > 0
+    ? info.store.graphRootAllocated
+    : null;
+  const machineDiskBytes =
+    parsePodmanMachineDiskBytes(machineInspectRaw) ??
+    parsePodmanMachineDiskBytes(info?.machine) ??
+    parseDiskSizeValue(info?.host?.machineDiskSize ?? info?.Resources?.DiskSize);
+  const effectiveDiskAllocated = machineDiskBytes ?? storeAllocated;
   return {
     version: info?.version?.Version ?? info?.host?.buildahVersion ?? "unknown",
     rootless,
@@ -1131,9 +1182,8 @@ export function parsePodmanInfo(rawJson) {
     cpus: Number.isFinite(info?.host?.cpus) ? info.host.cpus : null,
     memTotal: Number.isFinite(info?.host?.memTotal) ? info.host.memTotal : null,
     graphRoot: typeof info?.store?.graphRoot === "string" ? info.store.graphRoot : null,
-    graphRootAllocated: Number.isFinite(info?.store?.graphRootAllocated) && info.store.graphRootAllocated > 0
-      ? info.store.graphRootAllocated
-      : null,
+    graphRootAllocated: effectiveDiskAllocated,
+    machineDiskBytes: effectiveDiskAllocated,
     arch: typeof info?.host?.arch === "string" ? info.host.arch : null,
     remoteSocketPath: typeof info?.host?.remoteSocket?.path === "string" ? info.host.remoteSocket.path : null,
     remoteSocketExists: Boolean(info?.host?.remoteSocket?.exists)
@@ -1240,7 +1290,34 @@ export async function capturePodmanInfo(execute, stdin = null) {
   if (code !== 0) {
     return { code, info: null };
   }
-  return { code: 0, info: parsePodmanInfo(output.trim()) };
+  let machineInspectOutput = "";
+  const parsedInitial = parsePodmanInfo(output.trim());
+  if (parsedInitial && parsedInitial.graphRootAllocated === null) {
+    const machineStdout = new Writable({
+      write(chunk, _encoding, done) {
+        if (machineInspectOutput.length < 1024 * 1024) {
+          machineInspectOutput += chunk.toString();
+        }
+        done();
+      }
+    });
+    try {
+      const inspectCode = await execute(
+        { command: "podman", args: ["machine", "inspect"], timeoutMs: 10_000 },
+        { stdin, stdout: machineStdout, stderr: null }
+      );
+      if (inspectCode !== 0 || !machineInspectOutput.trim()) {
+        machineInspectOutput = "";
+        await execute(
+          { command: "podman", args: ["machine", "list", "--format", "json"], timeoutMs: 10_000 },
+          { stdin, stdout: machineStdout, stderr: null }
+        );
+      }
+    } catch {
+      // Best-effort machine disk inspection.
+    }
+  }
+  return { code: 0, info: parsePodmanInfo(output.trim(), machineInspectOutput.trim() || null) };
 }
 
 export async function ensurePodmanAvailable({
@@ -1323,9 +1400,10 @@ export async function ensurePodmanAvailable({
   if (platform === "darwin") {
     const req = PROFILE_REQUIREMENTS[profile] ?? PROFILE_REQUIREMENTS.small;
     const minEngineMem = ({ small: 3, medium: 5, large: 7, light: 3, standard: 3 }[profile] ?? 3) * 1024 ** 3;
+    const diskBytes = info.machineDiskBytes ?? info.graphRootAllocated;
     const cpuInsufficient = info.cpus !== null && info.cpus < req.cpuCount;
     const memInsufficient = info.memTotal !== null && info.memTotal < minEngineMem;
-    const diskInsufficient = info.graphRootAllocated !== null && info.graphRootAllocated < req.freshDiskBytes;
+    const diskInsufficient = diskBytes === null || diskBytes < req.freshDiskBytes;
     if (cpuInsufficient || memInsufficient || diskInsufficient) {
       stderr.write(
         `Podman machine resources are below the ${profile} profile requirements. Resize the Podman VM with:\n  ${podmanMachineResizeCommand(profile)}\n`

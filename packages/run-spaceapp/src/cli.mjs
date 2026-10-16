@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { once } from "node:events";
@@ -63,9 +63,9 @@ import {
   UNIVERSAL_COMMAND
 } from "./package-info.mjs";
 import {
-  INSTALL_PING_TIMEOUT_MS,
-  isInstallPingAllowed,
-  reportFirstInstallPing
+  createInstallFunnel,
+  installFunnelFacts,
+  isInstallPingAllowed
 } from "./telemetry.mjs";
 
 const APPLICATION_READY_WAIT_MINUTES = 10;
@@ -654,7 +654,8 @@ async function installCommand(args, {
     requestedEngine,
     noOpen,
     companionsEnabled,
-    telemetryEnabled
+    telemetryEnabled,
+    installId
   } = wizard;
   const existingConfig = await loadExistingInstallation(root);
   const existingEngine = existingConfig?.engine ?? "docker";
@@ -706,8 +707,20 @@ async function installCommand(args, {
   // The stored choice also drives the app's first_answer event after later updates, so an explicit
   // SPACEAPP_TELEMETRY at install time is stored like the answer it overrides (as for the install ping).
   if (!existingConfig && isInstallPingAllowed({ consent: telemetryEnabled, env })) {
-    result.config = { ...result.config, telemetry: true };
+    result.config = { ...result.config, telemetry: true, installId: installId ?? randomUUID() };
   }
+  // The funnel reports the step a fresh install with telemetry on stopped at; an install that never
+  // reports completed or failed (interrupted, or an error outside these steps) stays "started".
+  const reportFunnel = existingConfig || !result.config.installId ? null : createInstallFunnel({
+    installId: result.config.installId, platform, arch, launcherVersion, runtimeVersion, request,
+    facts: installFunnelFacts({ platform, resources, profile, accessMode })
+  });
+  void reportFunnel?.("install_started");
+  let stage = "resources";
+  const failInstall = async (code) => {
+    if (code !== 0) await reportFunnel?.("install_failed", { stage });
+    return code;
+  };
 
   stdout.write(`Launcher version: ${launcherVersion}\n`);
   stdout.write(
@@ -750,9 +763,10 @@ async function installCommand(args, {
     stderr.write(
       `Installation stopped before downloading images. Fix the failed checks and run "${UNIVERSAL_COMMAND} install" again.\n`
     );
-    return doctorCode;
+    return failInstall(doctorCode);
   }
 
+  stage = "docker";
   const prerequisiteResult = engine === "podman"
     ? await ensurePodman({
       platform,
@@ -780,8 +794,10 @@ async function installCommand(args, {
     stderr.write(
       `Installation stopped before downloading images. Fix the failed checks and run "${UNIVERSAL_COMMAND} install" again.\n`
     );
-    return prerequisiteResult.code;
+    return failInstall(prerequisiteResult.code);
   }
+
+  stage = "doctor";
 
   let storagePlan = await inspectStoragePlan({ root, config: { ...result.config, engine }, existingConfig, resources, execute, operation });
   if (requestedProfile === "auto" && !existingConfig) {
@@ -813,12 +829,13 @@ async function installCommand(args, {
     stderr.write(
       `Installation stopped before downloading images. Fix the failed checks and run "${UNIVERSAL_COMMAND} install" again.\n`
     );
-    return doctorCode;
+    return failInstall(doctorCode);
   }
   const stagedStateRoot = await mkdtemp(join(tmpdir(), "run-spaceapp-install-"));
   let runtimeMutationAttempted = false;
   let upgradeCheckpoint = null;
   const failAfterRuntimeMutation = async (code) => {
+    await failInstall(code);
     if (runtimeMutationAttempted) {
       await reportInstallDiagnostics({
         root,
@@ -852,6 +869,7 @@ async function installCommand(args, {
     return code;
   };
   try {
+    stage = "pull";
     await commitInstallation(stagedStateRoot, result.config);
     const stagedComposeCommand = (action, options = {}) =>
       composeCommand(action, root, {
@@ -871,9 +889,11 @@ async function installCommand(args, {
         { platform, stderr }
       )
     );
-    if (pullCode !== 0) return pullCode;
+    if (pullCode !== 0) return failInstall(pullCode);
+    stage = "storage";
     if (await verifyStorage({ root, config: { ...result.config, engine }, existingConfig, operation,
-      inspectResources, execute, stdout, stderr }) !== 0) return 1;
+      inspectResources, execute, stdout, stderr }) !== 0) return failInstall(1);
+    stage = "start";
     if(existingConfig && existingConfig.version !== result.config.version) {
       upgradeCheckpoint = await createQuiescedCheckpoint(root, existingConfig, {stdin,stdout,stderr,execute,platform});
     }
@@ -893,6 +913,7 @@ async function installCommand(args, {
     if (upCode !== 0) return await failAfterRuntimeMutation(upCode);
 
     const url = `http://${result.config.bindHost}:${result.config.port}`;
+    stage = "ready";
     stdout.write(
       `Waiting up to ${APPLICATION_READY_WAIT_MINUTES} minutes for SpaceApp services to become ready...\n`
     );
@@ -952,6 +973,7 @@ async function installCommand(args, {
       return await failAfterRuntimeMutation(1);
     }
 
+    stage = "owner_setup";
     let setupStatus;
     try {
       setupStatus = await requestSetupStatus({ url, request });
@@ -985,6 +1007,7 @@ async function installCommand(args, {
       }
     }
 
+    stage = "cleanup";
     const cleanupCode = await removeInactiveProfileServices({root, config: { ...result.config, engine },
       stateRoot: stagedStateRoot, execute, stdin, stdout, stderr});
     if (cleanupCode !== 0) return await failAfterRuntimeMutation(cleanupCode);
@@ -1006,24 +1029,7 @@ async function installCommand(args, {
     await commitInstallation(root, result.config);
     if(upgradeCheckpoint) await markCheckpointVerified(upgradeCheckpoint);
     runtimeMutationAttempted = false;
-    try {
-      await reportFirstInstallPing({
-        existingConfig,
-        consent: telemetryEnabled,
-        env,
-        platform,
-        arch,
-        launcherVersion,
-        runtimeVersion
-      }, {
-        request,
-        timeoutMs: INSTALL_PING_TIMEOUT_MS
-      });
-    } catch (error) {
-      stderr.write(
-        `SpaceApp installation report could not be sent: ${error?.message || String(error)}\n`
-      );
-    }
+    await reportFunnel?.("install_completed", { profile });
     stdout.write(`SpaceApp is ready at ${url}\n`);
     if (setupToken) {
       stdout.write(`One-time setup token: ${setupToken}\n`);
@@ -1138,7 +1144,8 @@ async function planInteractiveSetup({
       requestedEngine: actions.engine,
       noOpen: actions.noOpen !== false,
       companionsEnabled: actions.companionsEnabled ?? false,
-      telemetryEnabled: actions.telemetry ?? false
+      telemetryEnabled: actions.telemetry ?? false,
+      installId: actions.installId
     };
   }
 
@@ -1187,7 +1194,14 @@ async function planInteractiveSetup({
       );
     }
     const companionsChoice = await promptYesNo(stdin, stdout, "Enable companion integrations (Claude Code, browser companions)?", { defaultYes: parsed.companionsEnabled, answerKey: "companions" });
+    stdout.write(
+      "Anonymous telemetry sends spaceapp.dev a random install ID with the OS and its version, CPUs, RAM, profile,\n" +
+      "install progress, screen size, browser, language and country (no IP is stored), whether the owner, a CLI and\n" +
+      "a first answer were set up, and one 'active' event a day. Never files, prompts, answers, accounts or credentials.\n"
+    );
     const telemetryChoice = await promptYesNo(stdin, stdout, "Enable anonymous usage telemetry?", { defaultYes: false, answerKey: "telemetry" });
+    // Created at consent so a Windows continuation after the Docker install keeps the same install id.
+    const installId = telemetryChoice ? randomUUID() : undefined;
     let dockerChoice = true;
     if (platform === "win32" && resolvedEngine === "docker") {
       const dockerProbe = await detectDockerAvailable({ execute });
@@ -1224,6 +1238,7 @@ async function planInteractiveSetup({
         accessMode: accessChoice,
         companionsEnabled: companionsChoice,
         telemetry: telemetryChoice,
+        installId,
         noOpen: !openBrowserChoice
       });
     }
@@ -1233,7 +1248,8 @@ async function planInteractiveSetup({
       requestedEngine: engineChoice,
       noOpen: !openBrowserChoice,
       companionsEnabled: companionsChoice,
-      telemetryEnabled: telemetryChoice
+      telemetryEnabled: telemetryChoice,
+      installId
     };
   }
 
@@ -2142,31 +2158,45 @@ async function factoryResetCommand({
   stdout.write("\nWARNING: Factory reset will PERMANENTLY ERASE all local database records, persistent volumes, and configuration.\n");
   stdout.write("External workspaces outside the installation root are preserved.\n\n");
 
+  let backupCode;
   try {
     stdout.write("Creating safety backup before factory reset...\n");
-    await execute(
+    backupCode = await execute(
       composeCommand("backup", root, { profile: config.profile, companionsEnabled: config.companionsEnabled, engine: config.engine }),
       { stdin, stdout, stderr }
     );
   } catch (err) {
-    stdout.write(`Safety backup notice: ${err.message}. Continuing with reset confirmation.\n`);
+    stdout.write(`Safety backup error: ${err.message}.\n`);
+    backupCode = 1;
+  }
+  // Without a backup, erasing the data needs its own confirmation.
+  const phrase = backupCode === 0 ? "FACTORY-RESET" : "FACTORY-RESET-WITHOUT-BACKUP";
+  if (backupCode !== 0) {
+    stdout.write(
+      `The safety backup FAILED (exit ${backupCode}), so no backup of your data exists. ` +
+      `The backup needs SpaceApp running: cancel, run "${UNIVERSAL_COMMAND} up", and try again.\n`
+    );
   }
 
   const confirm = await readSecret(
     stdin,
     stdout,
-    "Type FACTORY-RESET to remove all data and reset SpaceApp: ",
+    `Type ${phrase} to remove all data and reset SpaceApp: `,
     { mask: false }
   );
-  if (confirm.trim() !== "FACTORY-RESET") {
+  if (confirm.trim() !== phrase) {
     stdout.write("Factory reset cancelled. No data was erased.\n");
     return 0;
   }
 
-  await execute(
+  const purgeCode = await execute(
     composeCommand("purge", root, { profile: config.profile, companionsEnabled: config.companionsEnabled, engine: config.engine }),
     { stdin, stdout, stderr }
   );
+  if (purgeCode !== 0) {
+    stderr.write(`Factory reset stopped: removing the data failed (exit ${purgeCode}). The configuration was kept; run "${UNIVERSAL_COMMAND} doctor".\n`);
+    return purgeCode;
+  }
 
   try {
     await rm(join(root, "config.json"), { force: true });
@@ -2408,9 +2438,10 @@ async function doctor({
       if (platform === "darwin") {
         const req = PROFILE_REQUIREMENTS[resolvedProfile] ?? PROFILE_REQUIREMENTS.small;
         const minEngineMem = ({ small: 3, medium: 5, large: 7, light: 3, standard: 3 }[resolvedProfile] ?? 3) * 1024 ** 3;
+        const diskBytes = info.machineDiskBytes ?? info.graphRootAllocated;
         const cpuOk = info.cpus === null || info.cpus >= req.cpuCount;
         const memOk = info.memTotal === null || info.memTotal >= minEngineMem;
-        const diskOk = info.graphRootAllocated === null || info.graphRootAllocated >= req.freshDiskBytes;
+        const diskOk = diskBytes !== null && diskBytes >= req.freshDiskBytes;
         const machineOk = cpuOk && memOk && diskOk;
         checks.push({
           name: "Podman machine",
