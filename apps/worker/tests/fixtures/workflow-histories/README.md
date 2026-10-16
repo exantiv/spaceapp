@@ -19,10 +19,14 @@ This directory contains synthetic Temporal workflow execution histories (`*.json
 From the repository root, run:
 
 ```sh
+# Record only missing fixtures (existing files are skipped by default):
 npm run temporal:record-histories -w @space/worker
+
+# Overwrite specific or all fixtures explicitly (after renaming/retaining pre-patch fixtures):
+npm run temporal:record-histories -w @space/worker -- --force [workflowFixtureName]
 ```
 
-All fixtures are generated locally against `@temporalio/testing`'s time-skipping server using synthetic inputs and stubbed activities (no network, database, Docker or AI provider required).
+All fixtures are generated locally against `@temporalio/testing`'s time-skipping server using synthetic inputs and stubbed activities (no external database, Docker, or AI provider required). Note that `TestWorkflowEnvironment.createTimeSkipping()` downloads and caches the Temporal test-server binary on first use unless a pre-downloaded binary is supplied via `server.executable`.
 
 ## When Re-recording Is Allowed
 

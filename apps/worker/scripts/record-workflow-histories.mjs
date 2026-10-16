@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +26,10 @@ const memoryMutationWorkflowsPath = path.resolve(workerRoot, "src/memory-mutatio
 
 const MEMORY_MAINTENANCE_TASK_QUEUE = "space-memory-maintenance";
 const SYNTHETIC_WORKER_IDENTITY = "synthetic-test-worker";
+
+const rawArgs = process.argv.slice(2);
+const forceOverwrite = rawArgs.includes("--force");
+const requestedFixtures = new Set(rawArgs.filter((arg) => !arg.startsWith("-")).map((arg) => arg.replace(/\.json$/i, "")));
 
 function syntheticError(message) {
   const err = new Error(message);
@@ -57,6 +62,14 @@ function buildSyntheticQueueItem(roomId, missionId, suffix, continuation = false
 }
 
 async function saveHistory(name, history) {
+  if (requestedFixtures.size > 0 && !requestedFixtures.has(name)) {
+    return;
+  }
+  const targetPath = path.join(fixturesDir, `${name}.json`);
+  if (existsSync(targetPath) && !forceOverwrite) {
+    console.log(`Skipping existing ${name}.json (pass --force to overwrite)`);
+    return;
+  }
   const parsed = JSON.parse(historyToJSON(history));
   const sanitized = JSON.parse(
     JSON.stringify(parsed, (key, value) => {
@@ -67,7 +80,6 @@ async function saveHistory(name, history) {
     })
   );
   const json = JSON.stringify(sanitized, null, 2).replace(/\r\n/g, "\n") + "\n";
-  const targetPath = path.join(fixturesDir, `${name}.json`);
   await writeFile(targetPath, json, "utf8");
   console.log(`Recorded ${name}.json`);
 }
