@@ -970,22 +970,27 @@ export async function runDevStack(argv = process.argv.slice(2), { env = process.
   await writeFile(config.composeFilePath, composeYaml, "utf8");
 
   process.stdout.write("[dev:stack] Starting PostgreSQL (pgvector) and Temporal in Docker...\n");
-  runDockerCompose(config, ["up", "-d"], ["ignore", "pipe", "pipe"]);
-  await waitForDockerServicesHealthy(config);
+  try {
+    runDockerCompose(config, ["up", "-d"], ["ignore", "pipe", "pipe"]);
+    await waitForDockerServicesHealthy(config);
 
-  await buildSourcePackages(config.repoRoot, (msg) => process.stdout.write(`${msg}\n`));
+    await buildSourcePackages(config.repoRoot, (msg) => process.stdout.write(`${msg}\n`));
 
-  process.stdout.write("[dev:stack] Running database migrations...\n");
-  execFileSync("npm", ["run", "db:migrate"], {
-    cwd: config.repoRoot,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      DATABASE_URL: secrets.databaseUrl,
-      SPACE_DATABASE_URL: secrets.databaseUrl,
-      SPACE_DATABASE_URL_FILE: secrets.databaseUrlPath
-    }
-  });
+    process.stdout.write("[dev:stack] Running database migrations...\n");
+    execFileSync("npm", ["run", "db:migrate"], {
+      cwd: config.repoRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        DATABASE_URL: secrets.databaseUrl,
+        SPACE_DATABASE_URL: secrets.databaseUrl,
+        SPACE_DATABASE_URL_FILE: secrets.databaseUrlPath
+      }
+    });
+  } catch (error) {
+    await stopDevStack(config, { removeVolumes: false, removeState: false, log: () => {} });
+    throw error;
+  }
 
   const sharedEnv = {
     ...process.env,
