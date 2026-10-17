@@ -84,7 +84,7 @@ async function registryLayers(image, arch, fetch) {
   return { layers: manifest.layers, diffIds: config.rootfs?.diff_ids };
 }
 
-export async function inspectStoragePlan({ root, config, existingConfig, resources, execute, operation, fetch = globalThis.fetch }) {
+export async function inspectStoragePlan({ root, config, existingConfig, resources, execute, operation, platform = process.platform, fetch = globalThis.fetch }) {
   const engineCommand = (config?.engine ?? existingConfig?.engine) === "podman" ? "podman" : "docker";
   const engineInfo = await captureProbe(execute, { command: engineCommand, args: ["info", "--format", "{{json .}}"] });
   let engine = null;
@@ -138,7 +138,7 @@ export async function inspectStoragePlan({ root, config, existingConfig, resourc
   }
   const storageRootDir = engine?.DockerRootDir ?? engine?.store?.graphRoot;
   // Linux can measure the container storage filesystem directly even on a fresh install.
-  if (storageRootDir && process.platform === "linux") {
+  if (storageRootDir && platform === "linux") {
     const { inspectSystemResources } = await import("./index.mjs");
     try { dockerFreeDiskBytes = (await inspectSystemResources(storageRootDir)).freeDiskBytes; } catch {}
   }
@@ -149,7 +149,7 @@ export async function inspectStoragePlan({ root, config, existingConfig, resourc
     : undefined;
   // On macOS the Podman engine runs in a VM; its disk is the machine's
   // configured DiskSize, not store.graphRootAllocated. Unknown must not pass.
-  if (engineCommand === "podman" && process.platform === "darwin") {
+  if (engineCommand === "podman" && platform === "darwin") {
     const { parsePodmanMachineDiskBytes } = await import("./prerequisites.mjs");
     let machineDisk = parsePodmanMachineDiskBytes(await captureProbe(execute, { command: "podman", args: ["machine", "inspect"] }));
     if (machineDisk === null) {

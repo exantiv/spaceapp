@@ -530,9 +530,9 @@ test("interactive wizard offers Podman when Docker is absent and Podman is avail
     "--no-open",
     "--answers",
     JSON.stringify({
-      engine: "podman",
       profile: "small",
-      accessMode: "isolated",
+      access: "isolated",
+      usePodman: true,
       bindHost: "127.0.0.1",
       port: 4911,
       telemetry: false,
@@ -557,6 +557,8 @@ test("interactive wizard offers Podman when Docker is absent and Podman is avail
   assert.equal(code, 0, stderr.value());
   const config = await loadConfig(root);
   assert.equal(config.engine, "podman");
+  assert.equal(calls.some((call) => call.command === "docker" && call.args?.[0] === "--version"), true);
+  assert.equal(calls.some((call) => call.command === "podman" && call.args?.[0] === "--version"), true);
   assert.equal(calls.some((call) => call.command === "podman" && call.args[0] === "compose"), true);
 });
 
@@ -593,4 +595,35 @@ test("inspectStoragePlan queries Podman store and image sizes when engine is pod
   const checks = storageChecks(plan, hostResources);
   assert.equal(checks.every((check) => check.ok), true);
   assert.equal(checks.some((check) => check.name === "Podman storage"), true);
+});
+
+test("inspectStoragePlan uses the injected platform for the Podman machine disk", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-podman-storage-platform-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { config } = await initializeInstallation(root, {
+    version: "1.1.5",
+    profile: "small",
+    engine: "podman"
+  });
+  const hostResources = {
+    cpuCount: 8,
+    totalMemoryBytes: 16 * 1024 ** 3,
+    freeDiskBytes: 40 * 1024 ** 3
+  };
+
+  const mac = withPodmanMachine(createPodmanExecute(), {
+    inspect: JSON.stringify([{ Resources: { DiskSize: 30 } }])
+  });
+  const macPlan = await inspectStoragePlan({ root, config, operation: "install", platform: "darwin", execute: mac.execute, resources: hostResources });
+  assert.equal(macPlan.resources.engineDiskBytes, 30 * 1024 ** 3);
+  assert.deepEqual(mac.machineCalls, ["machine inspect"]);
+
+  const macUnknown = withPodmanMachine(createPodmanExecute());
+  const macUnknownPlan = await inspectStoragePlan({ root, config, operation: "install", platform: "darwin", execute: macUnknown.execute, resources: hostResources });
+  assert.equal(macUnknownPlan.resources.engineDiskBytes, null);
+
+  const linux = withPodmanMachine(createPodmanExecute());
+  const linuxPlan = await inspectStoragePlan({ root, config, operation: "install", platform: "linux", execute: linux.execute, resources: hostResources });
+  assert.equal(linuxPlan.resources.engineDiskBytes, 64 * 1024 ** 3);
+  assert.deepEqual(linux.machineCalls, []);
 });

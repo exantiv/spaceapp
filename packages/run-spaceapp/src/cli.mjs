@@ -799,14 +799,14 @@ async function installCommand(args, {
 
   stage = "doctor";
 
-  let storagePlan = await inspectStoragePlan({ root, config: { ...result.config, engine }, existingConfig, resources, execute, operation });
+  let storagePlan = await inspectStoragePlan({ root, config: { ...result.config, engine }, existingConfig, resources, execute, operation, platform });
   if (requestedProfile === "auto" && !existingConfig) {
     const engineProfile = resolveInstallProfile("auto", storagePlan.resources);
     if (engineProfile !== profile) {
       profile = engineProfile;
       result.config = { ...result.config, profile };
       stdout.write(`${engineDisplayName} resources select profile: ${profile}.\n`);
-      storagePlan = await inspectStoragePlan({ root, config: { ...result.config, engine }, resources: storagePlan.resources, execute, operation });
+      storagePlan = await inspectStoragePlan({ root, config: { ...result.config, engine }, resources: storagePlan.resources, execute, operation, platform });
     }
   }
   const doctorCode = await doctor({
@@ -892,7 +892,7 @@ async function installCommand(args, {
     if (pullCode !== 0) return failInstall(pullCode);
     stage = "storage";
     if (await verifyStorage({ root, config: { ...result.config, engine }, existingConfig, operation,
-      inspectResources, execute, stdout, stderr }) !== 0) return failInstall(1);
+      inspectResources, execute, platform, stdout, stderr }) !== 0) return failInstall(1);
     stage = "start";
     if(existingConfig && existingConfig.version !== result.config.version) {
       upgradeCheckpoint = await createQuiescedCheckpoint(root, existingConfig, {stdin,stdout,stderr,execute,platform});
@@ -1436,7 +1436,7 @@ async function repairRuntime({ root, config, platform, stdin, stdout, stderr, ex
       installArgs: {root,requestedProfile:repaired.profile,requestedAccessMode:repaired.accessMode,noOpen:true,autoConfirm:true}});
   if(prerequisites.reexecuted || prerequisites.code !== 0) return prerequisites.code;
   config = repaired;
-  if (await verifyStorage({ root, config, existingConfig: config, operation: "repair", inspectResources, execute, stdout, stderr }) !== 0) return 1;
+  if (await verifyStorage({ root, config, existingConfig: config, operation: "repair", inspectResources, execute, platform, stdout, stderr }) !== 0) return 1;
   await saveConfig(root, config);
   await writeRuntimeFiles(root, config);
   const pullCode = await withHeadlessDockerConfig(
@@ -1448,7 +1448,7 @@ async function repairRuntime({ root, config, platform, stdin, stdout, stderr, ex
     writeWindowsCredentialHint(platform, stderr);
     return pullCode;
   }
-  if (await verifyStorage({ root, config, existingConfig: config, operation: "repair", inspectResources, execute, stdout, stderr }) !== 0) return 1;
+  if (await verifyStorage({ root, config, existingConfig: config, operation: "repair", inspectResources, execute, platform, stdout, stderr }) !== 0) return 1;
   const upCode = await execute(
     composeCommand("repair", root, { profile: config.profile, companionsEnabled: config.companionsEnabled, engine: config.engine }),
     { stdin, stdout, stderr }
@@ -1512,7 +1512,7 @@ async function performUpdate({
       writeWindowsCredentialHint(platform, stderr);
       throw new Error(`Image pull failed with ${engineLabel} exit ${pullCode}.`);
     }
-    if (await verifyStorage({ root, config: updated, existingConfig: config, operation: "upgrade", inspectResources, execute, stdout, stderr }) !== 0) return 1;
+    if (await verifyStorage({ root, config: updated, existingConfig: config, operation: "upgrade", inspectResources, execute, platform, stdout, stderr }) !== 0) return 1;
     checkpoint = await createQuiescedCheckpoint(root, config, {stdin, stdout, stderr, execute, platform});
     await commitInstallation(root, updated, { persistConfig: false });
     const upCode = await execute(
@@ -2295,7 +2295,7 @@ async function updateCommand(args, { root, config, version, platform, stdin, std
       installArgs: { root, requestedProfile: config.profile, noOpen: true, autoConfirm: true } });
   if (prerequisites.reexecuted || prerequisites.code !== 0) return prerequisites.code;
   const resources = await inspectResources(root);
-  const storagePlan = await inspectStoragePlan({ root, config: { ...config, version: targetVersion }, existingConfig: config, resources, execute, operation: "upgrade" });
+  const storagePlan = await inspectStoragePlan({ root, config: { ...config, version: targetVersion }, existingConfig: config, resources, execute, operation: "upgrade", platform });
   if (await doctor({ root, platform, stdout, stderr, execute, stdin, inspectResources, resources,
     profile: config.profile, dockerReady: true, operation: "upgrade", storagePlan, engine: config.engine, podmanInfo: prerequisites.info }) !== 0) return 1;
   return performUpdate({
@@ -2314,9 +2314,9 @@ async function updateCommand(args, { root, config, version, platform, stdin, std
   });
 }
 
-async function verifyStorage({ root, config, existingConfig, operation, inspectResources, execute, stdout, stderr }) {
+async function verifyStorage({ root, config, existingConfig, operation, inspectResources, execute, platform = process.platform, stdout, stderr }) {
   const resources = await inspectResources(root);
-  const plan = await inspectStoragePlan({ root, config, existingConfig, operation, resources, execute });
+  const plan = await inspectStoragePlan({ root, config, existingConfig, operation, resources, execute, platform });
   const checks = storageChecks(plan, resources, { engine: config?.engine ?? existingConfig?.engine });
   for (const check of checks) (check.ok ? stdout : stderr).write(`${check.ok ? "PASS" : "FAIL"} ${check.name}: ${check.detail}\n`);
   if (checks.some((check) => !check.ok)) {
