@@ -296,7 +296,9 @@ export function installResourceChecks(resources, profile = "small", { requiredDi
     ...(resources.engineCpuCount > 0 ? [{ name: `${engineLabel} CPU`, ok: resources.engineCpuCount >= requiredEngineCpus,
       detail: `${resources.engineCpuCount} allocated; ${requiredEngineCpus} required` }] : []),
     ...(resources.engineDiskBytes > 0 ? [{ name: `${engineLabel} disk`, ok: resources.engineDiskBytes >= minFreeDisk,
-      detail: `${formatGibibytes(resources.engineDiskBytes)} GiB allocated; ${formatGibibytes(minFreeDisk)} GiB required for ${profile}` }] : [])
+      detail: `${formatGibibytes(resources.engineDiskBytes)} GiB allocated; ${formatGibibytes(minFreeDisk)} GiB required for ${profile}` }] : []),
+    ...(resources.engineDiskBytes === null ? [{ name: `${engineLabel} disk`, ok: false,
+      detail: `allocated disk size unavailable; ${formatGibibytes(minFreeDisk)} GiB required for ${profile}` }] : [])
   ];
 }
 

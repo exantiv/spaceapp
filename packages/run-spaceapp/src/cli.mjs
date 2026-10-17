@@ -2381,7 +2381,7 @@ async function doctor({
     let infoResult = podmanInfo ? { code: 0, info: podmanInfo } : null;
     if (!infoResult) {
       if (podmanCliCode === 0) {
-        infoResult = await capturePodmanInfo(execute, stdin);
+        infoResult = await capturePodmanInfo(execute, stdin, { platform });
       } else {
         infoResult = { code: 1, info: null };
       }
@@ -2438,7 +2438,7 @@ async function doctor({
       if (platform === "darwin") {
         const req = PROFILE_REQUIREMENTS[resolvedProfile] ?? PROFILE_REQUIREMENTS.small;
         const minEngineMem = ({ small: 3, medium: 5, large: 7, light: 3, standard: 3 }[resolvedProfile] ?? 3) * 1024 ** 3;
-        const diskBytes = info.machineDiskBytes ?? info.graphRootAllocated;
+        const diskBytes = info.machineDiskBytes;
         const cpuOk = info.cpus === null || info.cpus >= req.cpuCount;
         const memOk = info.memTotal === null || info.memTotal >= minEngineMem;
         const diskOk = diskBytes !== null && diskBytes >= req.freshDiskBytes;

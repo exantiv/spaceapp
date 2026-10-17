@@ -1183,7 +1183,7 @@ export function parsePodmanInfo(rawJson, machineInspectRaw = null) {
     memTotal: Number.isFinite(info?.host?.memTotal) ? info.host.memTotal : null,
     graphRoot: typeof info?.store?.graphRoot === "string" ? info.store.graphRoot : null,
     graphRootAllocated: effectiveDiskAllocated,
-    machineDiskBytes: effectiveDiskAllocated,
+    machineDiskBytes,
     arch: typeof info?.host?.arch === "string" ? info.host.arch : null,
     remoteSocketPath: typeof info?.host?.remoteSocket?.path === "string" ? info.host.remoteSocket.path : null,
     remoteSocketExists: Boolean(info?.host?.remoteSocket?.exists)
@@ -1268,7 +1268,7 @@ export function podmanInstallInstructions(platform = process.platform, release =
   );
 }
 
-export async function capturePodmanInfo(execute, stdin = null) {
+export async function capturePodmanInfo(execute, stdin = null, { platform = process.platform } = {}) {
   let output = "";
   const stdout = new Writable({
     write(chunk, _encoding, done) {
@@ -1292,7 +1292,9 @@ export async function capturePodmanInfo(execute, stdin = null) {
   }
   let machineInspectOutput = "";
   const parsedInitial = parsePodmanInfo(output.trim());
-  if (parsedInitial && parsedInitial.graphRootAllocated === null) {
+  // `store.graphRootAllocated` is not the Podman machine's configured disk
+  // size, so off Linux always read DiskSize from the machine itself.
+  if (parsedInitial && (platform !== "linux" || parsedInitial.graphRootAllocated === null)) {
     const machineStdout = new Writable({
       write(chunk, _encoding, done) {
         if (machineInspectOutput.length < 1024 * 1024) {
@@ -1367,7 +1369,7 @@ export async function ensurePodmanAvailable({
     }
   }
 
-  const { code: infoCode, info } = await capturePodmanInfo(execute, stdin);
+  const { code: infoCode, info } = await capturePodmanInfo(execute, stdin, { platform });
   if (infoCode !== 0 || !info) {
     if (platform === "darwin") {
       stderr.write(
@@ -1400,7 +1402,7 @@ export async function ensurePodmanAvailable({
   if (platform === "darwin") {
     const req = PROFILE_REQUIREMENTS[profile] ?? PROFILE_REQUIREMENTS.small;
     const minEngineMem = ({ small: 3, medium: 5, large: 7, light: 3, standard: 3 }[profile] ?? 3) * 1024 ** 3;
-    const diskBytes = info.machineDiskBytes ?? info.graphRootAllocated;
+    const diskBytes = info.machineDiskBytes;
     const cpuInsufficient = info.cpus !== null && info.cpus < req.cpuCount;
     const memInsufficient = info.memTotal !== null && info.memTotal < minEngineMem;
     const diskInsufficient = diskBytes === null || diskBytes < req.freshDiskBytes;

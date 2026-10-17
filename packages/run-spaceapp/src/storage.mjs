@@ -144,9 +144,19 @@ export async function inspectStoragePlan({ root, config, existingConfig, resourc
   }
   const engineCpuCount = engine?.NCPU ?? engine?.host?.cpus;
   const engineMemoryBytes = engine?.MemTotal ?? engine?.host?.memTotal;
-  const engineDiskBytes = engineCommand === "podman" && Number.isFinite(engine?.store?.graphRootAllocated) && engine.store.graphRootAllocated > 0
+  let engineDiskBytes = engineCommand === "podman" && Number.isFinite(engine?.store?.graphRootAllocated) && engine.store.graphRootAllocated > 0
     ? engine.store.graphRootAllocated
     : undefined;
+  // On macOS the Podman engine runs in a VM; its disk is the machine's
+  // configured DiskSize, not store.graphRootAllocated. Unknown must not pass.
+  if (engineCommand === "podman" && process.platform === "darwin") {
+    const { parsePodmanMachineDiskBytes } = await import("./prerequisites.mjs");
+    let machineDisk = parsePodmanMachineDiskBytes(await captureProbe(execute, { command: "podman", args: ["machine", "inspect"] }));
+    if (machineDisk === null) {
+      machineDisk = parsePodmanMachineDiskBytes(await captureProbe(execute, { command: "podman", args: ["machine", "list", "--format", "json"] }));
+    }
+    engineDiskBytes = machineDisk;
+  }
   return { ...plan, engine: engineCommand, missingImages, sharedLayersEstimated, dockerFreeDiskBytes,
     resources: { ...resources,
       freeDiskBytes: dockerFreeDiskBytes === null ? resources.freeDiskBytes : Math.min(resources.freeDiskBytes, dockerFreeDiskBytes),

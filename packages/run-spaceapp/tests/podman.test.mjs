@@ -311,6 +311,91 @@ test("ensurePodmanAvailable checks macOS podman machine sizing and prints resize
   );
 });
 
+function withPodmanMachine(base, { inspect = null, list = null } = {}) {
+  const machineCalls = [];
+  const execute = async (spec, io = {}) => {
+    const args = spec.args ?? [];
+    if (spec.command === "podman" && args[0] === "machine") {
+      machineCalls.push(args.join(" "));
+      const payload = args[1] === "inspect" ? inspect : args[1] === "list" ? list : null;
+      if (payload === null) {
+        return 125;
+      }
+      io.stdout?.write(`${payload}\n`);
+      return 0;
+    }
+    return base.execute(spec, io);
+  };
+  return { execute, machineCalls };
+}
+
+test("parsePodmanInfo reports machine DiskSize separately from graphRootAllocated", () => {
+  const withoutMachine = parsePodmanInfo(healthyPodmanInfoPayload());
+  assert.equal(withoutMachine.machineDiskBytes, null);
+  assert.equal(withoutMachine.graphRootAllocated, 64 * 1024 ** 3);
+
+  const withMachine = parsePodmanInfo(
+    healthyPodmanInfoPayload(),
+    JSON.stringify([{ Name: "podman-machine-default", Resources: { CPUs: 4, DiskSize: 100, Memory: 8192 } }])
+  );
+  assert.equal(withMachine.machineDiskBytes, 100 * 1024 ** 3);
+});
+
+test("ensurePodmanAvailable on macOS validates the machine DiskSize, not graphRootAllocated", async () => {
+  const healthyInfo = healthyPodmanInfoPayload({ cpus: 8, memTotal: 16 * 1024 ** 3, graphRootAllocated: 64 * 1024 ** 3 });
+
+  const smallDisk = withPodmanMachine(createPodmanExecute({ podmanInfoPayload: healthyInfo }), {
+    inspect: JSON.stringify([{ Resources: { DiskSize: 5 } }])
+  });
+  const smallErr = capture();
+  const smallResult = await ensurePodmanAvailable({
+    platform: "darwin",
+    profile: "small",
+    execute: smallDisk.execute,
+    stdout: capture().stream,
+    stderr: smallErr.stream
+  });
+  assert.equal(smallResult.code, 1);
+  assert.match(smallErr.value(), /podman machine set --cpus 4 --memory 8192 --disk-size 20/);
+
+  const unknownDisk = withPodmanMachine(createPodmanExecute({ podmanInfoPayload: healthyInfo }));
+  const unknownResult = await ensurePodmanAvailable({
+    platform: "darwin",
+    profile: "small",
+    execute: unknownDisk.execute,
+    stdout: capture().stream,
+    stderr: capture().stream
+  });
+  assert.equal(unknownResult.code, 1, "an unavailable machine DiskSize must not satisfy the disk requirement");
+  assert.deepEqual(unknownDisk.machineCalls, ["machine inspect", "machine list --format json"]);
+
+  const largeDisk = withPodmanMachine(createPodmanExecute({ podmanInfoPayload: healthyInfo }), {
+    list: JSON.stringify([{ Name: "podman-machine-default", DiskSize: "100GiB" }])
+  });
+  const largeResult = await ensurePodmanAvailable({
+    platform: "darwin",
+    profile: "small",
+    execute: largeDisk.execute,
+    stdout: capture().stream,
+    stderr: capture().stream
+  });
+  assert.equal(largeResult.code, 0);
+  assert.equal(largeResult.info.machineDiskBytes, 100 * 1024 ** 3);
+});
+
+test("ensurePodmanAvailable on Linux does not query podman machine when storage size is known", async () => {
+  const linux = withPodmanMachine(createPodmanExecute());
+  const result = await ensurePodmanAvailable({
+    platform: "linux",
+    profile: "small",
+    execute: linux.execute,
+    stdout: capture().stream,
+    stderr: capture().stream
+  });
+  assert.equal(result.code, 0);
+  assert.deepEqual(linux.machineCalls, []);
+});
+
 test("ensurePodmanAvailable never auto-installs packages and prints distro instructions when missing", async () => {
   const calls = [];
   const stderr = capture();
